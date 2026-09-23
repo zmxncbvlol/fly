@@ -1,0 +1,518 @@
+--[[ FarmHelper (Studio) - StarterPlayerScripts > LocalScript ]]
+
+local Players, RunService, UIS, TS = game:GetService("Players"), game:GetService("RunService"), game:GetService("UserInputService"), game:GetService("TweenService")
+local player = Players.LocalPlayer
+local playerGui = player:WaitForChild("PlayerGui")
+
+local CONFIG = {
+	Speed = 800, MinSpeed = 100, MaxSpeed = 5000,
+	PointDelay = 0.1, ArriveDistance = 6, Loop = true, ToggleKey = Enum.KeyCode.F,
+	Theme = "Dark",
+	Center = Vector3.new(-30.87, 2.07, -14.92),
+	Waypoints = {
+		Vector3.new(-667.04, 294.55, -541.59), Vector3.new(490.13, 297.22, -541.59),
+		Vector3.new(447.9, 297.11, 487.81), Vector3.new(-666.23, 297.03, 487.70),
+	},
+}
+
+local THEMES = {
+	Dark = {
+		bg1 = Color3.fromRGB(32,32,42), bg2 = Color3.fromRGB(14,14,20),
+		header = Color3.fromRGB(40,40,52), accent = Color3.fromRGB(90,140,255), accent2 = Color3.fromRGB(180,110,255),
+		panel = Color3.fromRGB(44,44,56), panel2 = Color3.fromRGB(52,52,66),
+		text = Color3.new(1,1,1), subtext = Color3.fromRGB(160,160,175), stroke = Color3.fromRGB(255,255,255),
+		green = Color3.fromRGB(60,210,130), red = Color3.fromRGB(230,80,90), footer = Color3.fromRGB(24,24,32),
+	},
+	Light = {
+		bg1 = Color3.fromRGB(250,250,254), bg2 = Color3.fromRGB(230,230,240),
+		header = Color3.fromRGB(255,255,255), accent = Color3.fromRGB(50,105,235), accent2 = Color3.fromRGB(140,80,235),
+		panel = Color3.fromRGB(240,240,248), panel2 = Color3.fromRGB(226,226,238),
+		text = Color3.fromRGB(22,22,30), subtext = Color3.fromRGB(110,110,128), stroke = Color3.fromRGB(0,0,0),
+		green = Color3.fromRGB(40,180,110), red = Color3.fromRGB(220,60,70), footer = Color3.fromRGB(220,220,232),
+	},
+}
+
+local farming, runId, laps, startTime, currentIdx = false, 0, 0, 0, 0
+local ui = {}
+
+local function fmtTime(s)
+	return string.format("%02d:%02d", math.floor(s / 60), math.floor(s % 60))
+end
+
+local function setStatus(line1, line2)
+	if ui.status then ui.status.Text = line1 end
+	if ui.stats and line2 then ui.stats.Text = line2 end
+end
+
+local function getCharacter()
+	local char = player.Character
+	if not char then return nil end
+	local hrp, hum = char:FindFirstChild("HumanoidRootPart"), char:FindFirstChildOfClass("Humanoid")
+	if hrp and hum and hum.Health > 0 then return char, hrp, hum end
+	return nil
+end
+
+local function flyTo(target, isActive, instant)
+	local _, hrp, hum = getCharacter()
+	if not hrp then return false end
+
+	if instant then
+		hrp.AssemblyLinearVelocity = Vector3.zero
+		hrp.CFrame = CFrame.new(target) * hrp.CFrame.Rotation
+		return true
+	end
+
+	while isActive() do
+		local dt = RunService.Heartbeat:Wait()
+		if not isActive() or not hrp.Parent or hum.Health <= 0 then return false end
+		local offset = target - hrp.Position
+		local dist = offset.Magnitude
+		if dist <= CONFIG.ArriveDistance then
+			hrp.CFrame = CFrame.new(target) * hrp.CFrame.Rotation
+			return true
+		end
+		local newPos = hrp.Position + offset.Unit * math.min(CONFIG.Speed * dt, dist)
+		hrp.AssemblyLinearVelocity = Vector3.zero
+		hrp.CFrame = CFrame.new(newPos) * hrp.CFrame.Rotation
+	end
+	return false
+end
+
+--------------------------------------------------------------------
+-- UI 헬퍼
+--------------------------------------------------------------------
+local function make(class, props, parent)
+	local inst = Instance.new(class)
+	for k, v in pairs(props) do inst[k] = v end
+	inst.Parent = parent
+	return inst
+end
+
+local function corner(r, parent) make("UICorner", { CornerRadius = UDim.new(0, r or 8) }, parent) end
+
+local function iconDot(parent, color, size)
+	local d = make("Frame", {
+		Size = UDim2.new(0, size or 8, 0, size or 8),
+		BackgroundColor3 = color, BorderSizePixel = 0, AnchorPoint = Vector2.new(0, 0.5),
+	}, parent)
+	corner((size or 8) / 2, d)
+	return d
+end
+
+-- 아이콘 + 텍스트 버튼. 아이콘은 도형으로 그리고, 원형 배지 배경을 둠
+local function iconButton(iconType, text, pos, size, color, parent, fontSize)
+	local b = make("TextButton", {
+		Size = size, Position = pos, BackgroundColor3 = color, BorderSizePixel = 0,
+		Font = Enum.Font.GothamBold, Text = "", TextColor3 = Color3.new(1, 1, 1), TextSize = fontSize or 14,
+		AutoButtonColor = false,
+	}, parent)
+	corner(10, b)
+	make("UIGradient", { Rotation = 90, Color = ColorSequence.new(Color3.new(1,1,1), color),
+		Transparency = NumberSequence.new{ NumberSequenceKeypoint.new(0, 0.82), NumberSequenceKeypoint.new(1, 1) } }, b)
+
+	local badge = make("Frame", {
+		Size = UDim2.new(0, 30, 0, 30), Position = UDim2.new(0, 8, 0.5, -15),
+		BackgroundColor3 = Color3.new(1,1,1), BackgroundTransparency = 0.85, BorderSizePixel = 0,
+	}, b)
+	corner(15, badge)
+
+	local iconHolder = make("Frame", {
+		Size = UDim2.new(0, 16, 0, 16), Position = UDim2.new(0.5, -8, 0.5, -8), BackgroundTransparency = 1,
+	}, badge)
+
+	if iconType == "play" then
+		local tri = make("Frame", { Size = UDim2.new(0, 12, 0, 12), Position = UDim2.new(0.5, -4, 0.5, -6),
+			Rotation = 45, BackgroundColor3 = Color3.new(1,1,1), BorderSizePixel = 0 }, iconHolder)
+		corner(2, tri)
+		make("Frame", { Size = UDim2.new(0, 16, 0, 16), Position = UDim2.new(0, -8, 0, 0),
+			BackgroundColor3 = color, BorderSizePixel = 0, ZIndex = 2 }, iconHolder)
+	elseif iconType == "stop" then
+		local sq = make("Frame", { Size = UDim2.new(0, 12, 0, 12), Position = UDim2.new(0.5, -6, 0.5, -6),
+			BackgroundColor3 = Color3.new(1,1,1), BorderSizePixel = 0 }, iconHolder)
+		corner(3, sq)
+	elseif iconType == "target" then
+		local ring = make("Frame", { Size = UDim2.new(0, 16, 0, 16), BackgroundTransparency = 1 }, iconHolder)
+		make("UIStroke", { Thickness = 2, Color = Color3.new(1,1,1) }, ring)
+		corner(8, ring)
+		local dot = iconDot(ring, Color3.new(1,1,1), 5)
+		dot.AnchorPoint = Vector2.new(0.5, 0.5)
+		dot.Position = UDim2.new(0.5, 0, 0.5, 0)
+	end
+
+	local label = make("TextLabel", {
+		Size = UDim2.new(1, -54, 1, 0), Position = UDim2.new(0, 50, 0, 0), BackgroundTransparency = 1,
+		Font = Enum.Font.GothamBold, Text = text, TextColor3 = Color3.new(1,1,1), TextSize = fontSize or 14,
+		TextXAlignment = Enum.TextXAlignment.Left,
+	}, b)
+
+	b.MouseEnter:Connect(function()
+		TS:Create(b, TweenInfo.new(0.12), { BackgroundColor3 = color:Lerp(Color3.new(1,1,1), 0.18) }):Play()
+	end)
+	b.MouseLeave:Connect(function()
+		TS:Create(b, TweenInfo.new(0.12), { BackgroundColor3 = color }):Play()
+	end)
+	return b, label
+end
+
+local function smallButton(text, pos, size, color, parent)
+	local b = make("TextButton", {
+		Size = size, Position = pos, BackgroundColor3 = color, BorderSizePixel = 0,
+		Font = Enum.Font.GothamBold, Text = text, TextColor3 = Color3.new(1, 1, 1), TextSize = 12,
+		AutoButtonColor = false,
+	}, parent)
+	corner(8, b)
+	b.MouseEnter:Connect(function()
+		TS:Create(b, TweenInfo.new(0.12), { BackgroundColor3 = color:Lerp(Color3.new(1,1,1), 0.18) }):Play()
+	end)
+	b.MouseLeave:Connect(function()
+		TS:Create(b, TweenInfo.new(0.12), { BackgroundColor3 = color }):Play()
+	end)
+	return b
+end
+
+--------------------------------------------------------------------
+-- 화면 구성
+--------------------------------------------------------------------
+local gui = make("ScreenGui", { Name = "FarmHelper", ResetOnSpawn = false }, playerGui)
+
+local main = make("Frame", {
+	Size = UDim2.new(0, 320, 0, 340), Position = UDim2.new(0, 25, 1, -365),
+	BackgroundColor3 = THEMES.Dark.bg1, BorderSizePixel = 0, Active = true, ClipsDescendants = true,
+}, gui)
+corner(16, main)
+local stroke = make("UIStroke", { Color = THEMES.Dark.accent, Transparency = 0.4, Thickness = 1.4 }, main)
+local bgGradient = make("UIGradient", { Rotation = 100, Color = ColorSequence.new(THEMES.Dark.bg1, THEMES.Dark.bg2) }, main)
+
+-- 배경 장식 글로우
+local glow1 = make("Frame", { Size = UDim2.new(0, 160, 0, 160), Position = UDim2.new(1, -60, 0, -60),
+	BackgroundColor3 = THEMES.Dark.accent, BackgroundTransparency = 0.9, BorderSizePixel = 0, ZIndex = 0 }, main)
+corner(80, glow1)
+local glow2 = make("Frame", { Size = UDim2.new(0, 140, 0, 140), Position = UDim2.new(0, -50, 1, -90),
+	BackgroundColor3 = THEMES.Dark.accent2, BackgroundTransparency = 0.92, BorderSizePixel = 0, ZIndex = 0 }, main)
+corner(70, glow2)
+
+local title = make("Frame", { Size = UDim2.new(1, 0, 0, 44), BackgroundColor3 = THEMES.Dark.header, BorderSizePixel = 0 }, main)
+corner(16, title)
+make("Frame", { Size = UDim2.new(1,0,0,16), Position = UDim2.new(0,0,1,-16), BackgroundColor3 = THEMES.Dark.header, BorderSizePixel = 0 }, title)
+
+local accentBar = make("Frame", { Size = UDim2.new(0, 4, 0, 22), Position = UDim2.new(0, 14, 0.5, -11), BackgroundColor3 = THEMES.Dark.accent, BorderSizePixel = 0 }, title)
+corner(2, accentBar)
+make("UIGradient", { Rotation = 90, Color = ColorSequence.new(THEMES.Dark.accent, THEMES.Dark.accent2) }, accentBar)
+
+local titleText = make("TextLabel", {
+	Size = UDim2.new(1, -130, 0, 18), Position = UDim2.new(0, 26, 0, 7), BackgroundTransparency = 1,
+	Font = Enum.Font.GothamBlack, Text = "FARM HELPER", TextColor3 = THEMES.Dark.text, TextSize = 16,
+	TextXAlignment = Enum.TextXAlignment.Left,
+}, title)
+local subTitleText = make("TextLabel", {
+	Size = UDim2.new(1, -130, 0, 14), Position = UDim2.new(0, 26, 0, 24), BackgroundTransparency = 1,
+	Font = Enum.Font.Gotham, Text = "단축키 [" .. CONFIG.ToggleKey.Name .. "] 로 토글", TextColor3 = THEMES.Dark.subtext, TextSize = 10,
+	TextXAlignment = Enum.TextXAlignment.Left,
+}, title)
+
+local closeBtn = smallButton("×", UDim2.new(1, -36, 0, 10), UDim2.new(0, 24, 0, 24), Color3.fromRGB(210, 70, 80), title)
+closeBtn.TextSize = 16
+local miniBtn = smallButton("–", UDim2.new(1, -68, 0, 10), UDim2.new(0, 24, 0, 24), Color3.fromRGB(90, 90, 104), title)
+miniBtn.TextSize = 16
+local themeBtn = smallButton("◐", UDim2.new(1, -100, 0, 10), UDim2.new(0, 24, 0, 24), Color3.fromRGB(90, 90, 104), title)
+themeBtn.TextSize = 14
+
+local body = make("Frame", { Size = UDim2.new(1, -24, 1, -78), Position = UDim2.new(0, 12, 0, 48), BackgroundTransparency = 1, ZIndex = 1 }, main)
+
+ui.farmBtn, ui.farmLabel = iconButton("play", "START FARMING", UDim2.new(0, 0, 0, 0), UDim2.new(1, 0, 0, 50), THEMES.Dark.green, body, 14)
+local centerBtn, centerLabel = iconButton("target", "TELEPORT TO CENTER", UDim2.new(0, 0, 0, 58), UDim2.new(1, 0, 0, 44), THEMES.Dark.accent, body, 13)
+
+-- 속도 패널 -----------------------------------------------------------
+local speedPanel = make("Frame", { Size = UDim2.new(1, 0, 0, 64), Position = UDim2.new(0, 0, 0, 112), BackgroundColor3 = THEMES.Dark.panel, BorderSizePixel = 0 }, body)
+corner(12, speedPanel)
+make("UIStroke", { Color = THEMES.Dark.stroke, Transparency = 0.9, Thickness = 1 }, speedPanel)
+
+ui.speedLabel = make("TextLabel", {
+	Size = UDim2.new(0, 100, 0, 16), Position = UDim2.new(0, 12, 0, 8), BackgroundTransparency = 1,
+	Font = Enum.Font.GothamBold, Text = "SPEED", TextColor3 = THEMES.Dark.subtext, TextSize = 11,
+	TextXAlignment = Enum.TextXAlignment.Left,
+}, speedPanel)
+ui.speedValue = make("TextLabel", {
+	Size = UDim2.new(0, 90, 0, 20), Position = UDim2.new(1, -100, 0, 4), BackgroundTransparency = 1,
+	Font = Enum.Font.GothamBlack, Text = "800", TextColor3 = THEMES.Dark.accent, TextSize = 15,
+	TextXAlignment = Enum.TextXAlignment.Right,
+}, speedPanel)
+
+local sliderTrack = make("Frame", {
+	Size = UDim2.new(1, -24, 0, 8), Position = UDim2.new(0, 12, 0, 32),
+	BackgroundColor3 = Color3.fromRGB(18, 18, 24), BorderSizePixel = 0,
+}, speedPanel)
+corner(4, sliderTrack)
+local sliderFill = make("Frame", { Size = UDim2.new(0, 0, 1, 0), BackgroundColor3 = THEMES.Dark.accent, BorderSizePixel = 0 }, sliderTrack)
+corner(4, sliderFill)
+make("UIGradient", { Color = ColorSequence.new(THEMES.Dark.accent, THEMES.Dark.accent2) }, sliderFill)
+local sliderKnob = make("Frame", {
+	Size = UDim2.new(0, 16, 0, 16), Position = UDim2.new(0, -8, 0.5, -8),
+	BackgroundColor3 = Color3.new(1, 1, 1), BorderSizePixel = 0, ZIndex = 2,
+}, sliderTrack)
+corner(8, sliderKnob)
+make("UIStroke", { Color = THEMES.Dark.accent, Thickness = 2 }, sliderKnob)
+
+ui.loopBtn = smallButton("LOOP ON", UDim2.new(0, 26, 0, 46), UDim2.new(0, 100, 0, 14), Color3.new(0,0,0), speedPanel)
+ui.loopBtn.BackgroundTransparency = 1
+ui.loopBtn.TextSize = 10
+ui.loopBtn.TextXAlignment = Enum.TextXAlignment.Left
+local loopDot = iconDot(ui.loopBtn, THEMES.Dark.green, 8)
+loopDot.AnchorPoint = Vector2.new(0, 0.5)
+loopDot.Position = UDim2.new(0, -14, 0.5, 0)
+
+-- 상태 패널 (진행 바 포함) ----------------------------------------------
+local statusPanel = make("Frame", { Size = UDim2.new(1, 0, 0, 86), Position = UDim2.new(0, 0, 0, 184), BackgroundColor3 = THEMES.Dark.panel2, BorderSizePixel = 0 }, body)
+corner(12, statusPanel)
+make("UIStroke", { Color = THEMES.Dark.stroke, Transparency = 0.9, Thickness = 1 }, statusPanel)
+
+local statusDot = make("Frame", { Size = UDim2.new(0, 10, 0, 10), Position = UDim2.new(0, 14, 0, 17), BackgroundColor3 = Color3.fromRGB(120,120,132), BorderSizePixel = 0 }, statusPanel)
+corner(5, statusDot)
+make("UIStroke", { Color = Color3.new(1,1,1), Transparency = 0.7, Thickness = 1 }, statusDot)
+
+ui.status = make("TextLabel", {
+	Size = UDim2.new(1, -34, 0, 20), Position = UDim2.new(0, 32, 0, 10), BackgroundTransparency = 1,
+	Font = Enum.Font.GothamBold, Text = "Idle", TextColor3 = THEMES.Dark.text,
+	TextSize = 14, TextXAlignment = Enum.TextXAlignment.Left,
+}, statusPanel)
+ui.stats = make("TextLabel", {
+	Size = UDim2.new(1, -28, 0, 18), Position = UDim2.new(0, 14, 0, 38), BackgroundTransparency = 1,
+	Font = Enum.Font.Gotham, Text = "Laps 0   •   00:00", TextColor3 = THEMES.Dark.subtext,
+	TextSize = 11, TextXAlignment = Enum.TextXAlignment.Left,
+}, statusPanel)
+
+-- 웨이포인트 진행 바
+local progTrack = make("Frame", {
+	Size = UDim2.new(1, -28, 0, 6), Position = UDim2.new(0, 14, 0, 66),
+	BackgroundColor3 = Color3.fromRGB(18, 18, 24), BorderSizePixel = 0,
+}, statusPanel)
+corner(3, progTrack)
+local progFill = make("Frame", { Size = UDim2.new(0, 0, 1, 0), BackgroundColor3 = THEMES.Dark.accent, BorderSizePixel = 0 }, progTrack)
+corner(3, progFill)
+make("UIGradient", { Color = ColorSequence.new(THEMES.Dark.accent, THEMES.Dark.accent2) }, progFill)
+
+-- 푸터
+local footer = make("Frame", { Size = UDim2.new(1, 0, 0, 20), Position = UDim2.new(0, 0, 1, -20), BackgroundColor3 = THEMES.Dark.footer, BorderSizePixel = 0 }, main)
+corner(16, footer)
+make("Frame", { Size = UDim2.new(1,0,0,10), Position = UDim2.new(0,0,0,0), BackgroundColor3 = THEMES.Dark.footer, BorderSizePixel = 0 }, footer)
+local footerText = make("TextLabel", {
+	Size = UDim2.new(1, -20, 1, 0), Position = UDim2.new(0, 12, 0, 0), BackgroundTransparency = 1,
+	Font = Enum.Font.Gotham, Text = ("Waypoints %d loaded   •   v1.0"):format(#CONFIG.Waypoints),
+	TextColor3 = THEMES.Dark.subtext, TextSize = 10, TextXAlignment = Enum.TextXAlignment.Left,
+}, footer)
+
+--------------------------------------------------------------------
+-- 상태/테마 갱신 함수
+--------------------------------------------------------------------
+local function updateProgress()
+	local frac = 0
+	if #CONFIG.Waypoints > 0 then frac = currentIdx / #CONFIG.Waypoints end
+	frac = math.clamp(frac, 0, 1)
+	TS:Create(progFill, TweenInfo.new(0.25), { Size = UDim2.new(frac, 0, 1, 0) }):Play()
+end
+
+local function refreshButtons()
+	local th = THEMES[CONFIG.Theme]
+	if farming then
+		TS:Create(ui.farmBtn, TweenInfo.new(0.2), { BackgroundColor3 = th.red }):Play()
+		ui.farmLabel.Text = "STOP FARMING"
+	else
+		TS:Create(ui.farmBtn, TweenInfo.new(0.2), { BackgroundColor3 = th.green }):Play()
+		ui.farmLabel.Text = "START FARMING"
+	end
+	ui.loopBtn.Text = CONFIG.Loop and "LOOP ON" or "LOOP OFF"
+	TS:Create(loopDot, TweenInfo.new(0.15), { BackgroundColor3 = CONFIG.Loop and th.green or Color3.fromRGB(110,110,120) }):Play()
+	ui.speedValue.Text = tostring(math.floor(CONFIG.Speed))
+end
+
+local function stopFarm()
+	farming = false
+	runId += 1
+	currentIdx = 0
+	setStatus("Idle")
+	updateProgress()
+	refreshButtons()
+end
+
+local function startFarm()
+	if farming then return end
+	farming, laps, startTime, currentIdx = true, 0, os.clock(), 0
+	runId += 1
+	local myId = runId
+	refreshButtons()
+	local function isActive() return farming and runId == myId end
+
+	task.spawn(function()
+		while isActive() do
+			for i, point in ipairs(CONFIG.Waypoints) do
+				if not isActive() then break end
+				if not getCharacter() then
+					setStatus("캐릭터 대기 중...")
+					task.wait(0.3)
+					break
+				end
+				currentIdx = i
+				updateProgress()
+				setStatus(("이동 중 · %d / %d"):format(i, #CONFIG.Waypoints),
+					("Laps %d   •   %s"):format(laps, fmtTime(os.clock() - startTime)))
+				if flyTo(point, isActive) then task.wait(CONFIG.PointDelay) end
+			end
+			if isActive() then
+				laps += 1
+				currentIdx = 0
+				updateProgress()
+				if not CONFIG.Loop then break end
+			end
+			task.wait()
+		end
+		if runId == myId then
+			farming = false
+			setStatus("완료", ("Laps %d   •   %s"):format(laps, fmtTime(os.clock() - startTime)))
+			refreshButtons()
+		end
+	end)
+end
+
+local function goToCenter()
+	stopFarm()
+	local myId = runId
+	task.spawn(function()
+		local ok = flyTo(CONFIG.Center, function() return runId == myId end, true)
+		if runId == myId then setStatus(ok and "중앙에 도착" or "Idle") end
+	end)
+end
+
+local function updateSliderVisual()
+	local frac = (CONFIG.Speed - CONFIG.MinSpeed) / (CONFIG.MaxSpeed - CONFIG.MinSpeed)
+	frac = math.clamp(frac, 0, 1)
+	sliderFill.Size = UDim2.new(frac, 0, 1, 0)
+	sliderKnob.Position = UDim2.new(frac, -8, 0.5, -8)
+	ui.speedValue.Text = tostring(math.floor(CONFIG.Speed))
+end
+
+task.spawn(function()
+	while true do
+		if farming then
+			TS:Create(statusDot, TweenInfo.new(0.6, Enum.EasingStyle.Sine), { BackgroundTransparency = 0.65 }):Play()
+			task.wait(0.6)
+			TS:Create(statusDot, TweenInfo.new(0.6, Enum.EasingStyle.Sine), { BackgroundTransparency = 0 }):Play()
+			task.wait(0.6)
+		else
+			statusDot.BackgroundTransparency = 0
+			task.wait(0.2)
+		end
+	end
+end)
+
+local function updateStatusDotColor()
+	local th = THEMES[CONFIG.Theme]
+	TS:Create(statusDot, TweenInfo.new(0.2), { BackgroundColor3 = farming and th.green or Color3.fromRGB(120,120,132) }):Play()
+end
+
+local function applyTheme(name)
+	local th = THEMES[name]
+	CONFIG.Theme = name
+	local ti = TweenInfo.new(0.25)
+	TS:Create(main, ti, { BackgroundColor3 = th.bg1 }):Play()
+	TS:Create(stroke, ti, { Color = th.accent }):Play()
+	bgGradient.Color = ColorSequence.new(th.bg1, th.bg2)
+	TS:Create(title, ti, { BackgroundColor3 = th.header }):Play()
+	TS:Create(footer, ti, { BackgroundColor3 = th.footer }):Play()
+	TS:Create(glow1, ti, { BackgroundColor3 = th.accent }):Play()
+	TS:Create(glow2, ti, { BackgroundColor3 = th.accent2 }):Play()
+	TS:Create(accentBar, ti, { BackgroundColor3 = th.accent }):Play()
+	titleText.TextColor3 = th.text
+	subTitleText.TextColor3 = th.subtext
+	footerText.TextColor3 = th.subtext
+	TS:Create(speedPanel, ti, { BackgroundColor3 = th.panel }):Play()
+	TS:Create(statusPanel, ti, { BackgroundColor3 = th.panel2 }):Play()
+	ui.status.TextColor3 = th.text
+	ui.stats.TextColor3 = th.subtext
+	ui.speedLabel.TextColor3 = th.subtext
+	ui.speedValue.TextColor3 = th.accent
+	sliderFill.BackgroundColor3 = th.accent
+	progFill.BackgroundColor3 = th.accent
+	TS:Create(centerBtn, ti, { BackgroundColor3 = th.accent }):Play()
+	themeBtn.Text = name == "Dark" and "◐" or "◑"
+	refreshButtons()
+	updateStatusDotColor()
+end
+
+refreshButtons()
+updateSliderVisual()
+updateStatusDotColor()
+updateProgress()
+applyTheme(CONFIG.Theme)
+RunService.Heartbeat:Connect(updateStatusDotColor)
+
+--------------------------------------------------------------------
+-- 이벤트
+--------------------------------------------------------------------
+ui.farmBtn.MouseButton1Click:Connect(function() if farming then stopFarm() else startFarm() end end)
+centerBtn.MouseButton1Click:Connect(goToCenter)
+ui.loopBtn.MouseButton1Click:Connect(function() CONFIG.Loop = not CONFIG.Loop refreshButtons() end)
+themeBtn.MouseButton1Click:Connect(function() applyTheme(CONFIG.Theme == "Dark" and "Light" or "Dark") end)
+
+local minimized = false
+miniBtn.MouseButton1Click:Connect(function()
+	minimized = not minimized
+	body.Visible = not minimized
+	footer.Visible = not minimized
+	TS:Create(main, TweenInfo.new(0.2, Enum.EasingStyle.Quad), {
+		Size = minimized and UDim2.new(0, 320, 0, 44) or UDim2.new(0, 320, 0, 340)
+	}):Play()
+end)
+closeBtn.MouseButton1Click:Connect(function() stopFarm() gui:Destroy() end)
+
+UIS.InputBegan:Connect(function(input, processed)
+	if processed then return end
+	if input.KeyCode == CONFIG.ToggleKey then if farming then stopFarm() else startFarm() end end
+end)
+
+local function onCharacterAdded(char)
+	char:WaitForChild("Humanoid").Died:Connect(function()
+		if farming then stopFarm() setStatus("사망 - 중지됨") end
+	end)
+end
+if player.Character then onCharacterAdded(player.Character) end
+player.CharacterAdded:Connect(onCharacterAdded)
+
+-- 창 드래그 + 속도 슬라이더 드래그
+do
+	local dragging, dragStart, startPos = false, nil, nil
+	local draggingSlider = false
+
+	local function setSpeedFromX(x)
+		local rel = (x - sliderTrack.AbsolutePosition.X) / sliderTrack.AbsoluteSize.X
+		rel = math.clamp(rel, 0, 1)
+		CONFIG.Speed = math.floor(CONFIG.MinSpeed + rel * (CONFIG.MaxSpeed - CONFIG.MinSpeed))
+		refreshButtons()
+		updateSliderVisual()
+	end
+
+	local function isPress(input)
+		return input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch
+	end
+
+	title.InputBegan:Connect(function(input)
+		if isPress(input) then dragging, dragStart, startPos = true, input.Position, main.Position end
+	end)
+	sliderTrack.InputBegan:Connect(function(input)
+		if isPress(input) then draggingSlider = true setSpeedFromX(input.Position.X) end
+	end)
+	sliderKnob.InputBegan:Connect(function(input)
+		if isPress(input) then draggingSlider = true end
+	end)
+
+	UIS.InputChanged:Connect(function(input)
+		if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+			local delta = input.Position - dragStart
+			main.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+		elseif draggingSlider and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+			setSpeedFromX(input.Position.X)
+		end
+	end)
+	UIS.InputEnded:Connect(function(input)
+		if isPress(input) then dragging, draggingSlider = false, false end
+	end)
+end
